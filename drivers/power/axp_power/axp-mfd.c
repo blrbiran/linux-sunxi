@@ -15,13 +15,20 @@
 #include <linux/delay.h>
 #include <linux/reboot.h>
 #include <linux/slab.h>
+#include <linux/io.h>
 
 #include "axp-cfg.h"
 #include "axp18-mfd.h"
 #include "axp19-mfd.h"
 #include "axp20-mfd.h"
 
+#include <plat/platform.h>
+#include <plat/system.h>
 #include <plat/sys_config.h>
+
+#define NMI_IRQ_CTRL_REG	(SW_VA_IO_BASE + 0x30)
+#define NMI_IRQ_PEND_REG	(SW_VA_IO_BASE + 0x34)
+#define NMI_IRQ_ENABLE_REG	(SW_VA_IO_BASE + 0x38)
 
 static int power_start;
 
@@ -42,6 +49,11 @@ static void axp_mfd_irq_work(struct work_struct *work)
 		blocking_notifier_call_chain(
 				&chip->notifier_list, irqs, NULL);
 	}
+
+	/* The irq raised by the A20 NMI pin needs explict clearing */
+	if (sunxi_is_sun7i() && chip->client->irq == SW_INT_IRQNO_ENMI)
+		writel(0x01, NMI_IRQ_PEND_REG);
+
 	enable_irq(chip->client->irq);
 }
 
@@ -194,6 +206,8 @@ static void axp_power_off(void)
 {
 	uint8_t val;
 
+	preempt_count() = 0;
+
 #if defined (CONFIG_AW_AXP18)
 	axp_set_bits(&axp->dev, POWER18_ONOFF, 0x80);
 #endif
@@ -302,6 +316,11 @@ static int __devinit axp_mfd_probe(struct i2c_client *client,
   		goto out_free_chip;
   	}
 
+	/* The irq for the A20 NMI pin needs to be enabled separately */
+	if (sunxi_is_sun7i() && client->irq == SW_INT_IRQNO_ENMI) {
+		writel(0x01, NMI_IRQ_PEND_REG);   /* Clear any pending irqs */
+		writel(0x01, NMI_IRQ_ENABLE_REG); /* Enable NMI irq pin */
+	}
 
 	ret = axp_mfd_add_subdevs(chip, pdata);
 	if (ret)
@@ -343,6 +362,13 @@ static int __devexit axp_mfd_remove(struct i2c_client *client)
 
 	pm_power_off = NULL;
 	axp = NULL;
+
+#ifdef CONFIG_AXP_HWMON
+	if (chip->itm_enabled == 1) {
+		hwmon_device_unregister(chip->hwmon_dev);
+		sysfs_remove_group(&client->dev.kobj, &axp20_group);
+	}
+#endif
 
 	axp_mfd_remove_subdevs(chip);
 	kfree(chip);
